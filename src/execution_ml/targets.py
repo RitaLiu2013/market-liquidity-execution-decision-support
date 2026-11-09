@@ -4,120 +4,149 @@ import numpy as np
 import pandas as pd
 
 
-def add_wait_cost_targets(
+def add_future_execution_targets(
     df: pd.DataFrame,
-    quantity: float = 1000,
-    horizon_seconds: float = 5.0,
-    tolerance_seconds: float = 1.0,
+    quantity: int,
+    horizons: tuple[float, ...] = (1.0, 5.0, 10.0),
 ) -> pd.DataFrame:
     out = df.copy()
 
-    suffix = int(quantity)
-
-    times = out["time"].to_numpy(dtype=float)
+    time = out["time"].to_numpy(dtype=float)
     mid = out["mid"].to_numpy(dtype=float)
 
     buy_vwap = out[
-        f"buy_vwap_{suffix}"
+        f"buy_vwap_{quantity}"
     ].to_numpy(dtype=float)
 
     sell_vwap = out[
-        f"sell_vwap_{suffix}"
+        f"sell_vwap_{quantity}"
     ].to_numpy(dtype=float)
 
-    desired_times = times + horizon_seconds
+    n = len(out)
 
-    future_idx = np.searchsorted(
-        times,
-        desired_times,
-        side="left",
-    )
+    for horizon in horizons:
+        target_time = time + horizon
 
-    valid = future_idx < len(out)
-
-    safe_idx = np.minimum(
-        future_idx,
-        len(out) - 1,
-    )
-
-    future_times = times[safe_idx]
-
-    valid &= (
-        future_times
-        <= desired_times + tolerance_seconds
-    )
-
-    future_mid = np.full(len(out), np.nan)
-    future_buy_vwap = np.full(len(out), np.nan)
-    future_sell_vwap = np.full(len(out), np.nan)
-
-    future_mid[valid] = mid[safe_idx[valid]]
-
-    future_buy_vwap[valid] = (
-        buy_vwap[safe_idx[valid]]
-    )
-
-    future_sell_vwap[valid] = (
-        sell_vwap[safe_idx[valid]]
-    )
-
-    out["future_time"] = np.where(
-        valid,
-        future_times,
-        np.nan,
-    )
-
-    out["actual_horizon_seconds"] = (
-        out["future_time"] - out["time"]
-    )
-
-    out["future_mid"] = future_mid
-
-    out[f"future_buy_vwap_{suffix}"] = (
-        future_buy_vwap
-    )
-
-    out[f"future_sell_vwap_{suffix}"] = (
-        future_sell_vwap
-    )
-
-    # Cost of waiting for a BUY order,
-    # measured relative to the current decision-time mid.
-    out[f"wait_buy_cost_bps_{suffix}"] = (
-        (
-            out[f"future_buy_vwap_{suffix}"]
-            - out["mid"]
+        future_idx = np.searchsorted(
+            time,
+            target_time,
+            side="left",
         )
-        / out["mid"]
-        * 10_000
-    )
 
-    # Cost of waiting for a SELL order.
-    out[f"wait_sell_cost_bps_{suffix}"] = (
-        (
-            out["mid"]
-            - out[f"future_sell_vwap_{suffix}"]
+        valid = future_idx < n
+
+        matched_time = np.full(
+            n,
+            np.nan,
+            dtype=float,
         )
-        / out["mid"]
-        * 10_000
-    )
 
-    # Decomposition for interpretation.
-    out["future_mid_move_buy_bps"] = (
-        (out["future_mid"] - out["mid"])
-        / out["mid"]
-        * 10_000
-    )
-
-    out[
-        f"future_buy_liquidity_cost_bps_{suffix}"
-    ] = (
-        (
-            out[f"future_buy_vwap_{suffix}"]
-            - out["future_mid"]
+        future_mid = np.full(
+            n,
+            np.nan,
+            dtype=float,
         )
-        / out["future_mid"]
-        * 10_000
-    )
+
+        future_buy_vwap = np.full(
+            n,
+            np.nan,
+            dtype=float,
+        )
+
+        future_sell_vwap = np.full(
+            n,
+            np.nan,
+            dtype=float,
+        )
+
+        matched_time[valid] = (
+            time[future_idx[valid]]
+        )
+
+        future_mid[valid] = (
+            mid[future_idx[valid]]
+        )
+
+        future_buy_vwap[valid] = (
+            buy_vwap[future_idx[valid]]
+        )
+
+        future_sell_vwap[valid] = (
+            sell_vwap[future_idx[valid]]
+        )
+
+        suffix = (
+            str(horizon)
+            .replace(".", "p")
+        )
+
+        out[
+            f"future_time_{suffix}s"
+        ] = matched_time
+
+        out[
+            f"actual_horizon_{suffix}s"
+        ] = (
+            matched_time - time
+        )
+
+        out[
+            f"future_mid_{suffix}s"
+        ] = future_mid
+
+        out[
+            f"wait_buy_cost_bps_{suffix}s"
+        ] = (
+            (
+                future_buy_vwap
+                - mid
+            )
+            / mid
+            * 10_000
+        )
+
+        out[
+            f"wait_sell_cost_bps_{suffix}s"
+        ] = (
+            (
+                mid
+                - future_sell_vwap
+            )
+            / mid
+            * 10_000
+        )
+
+        out[
+            f"mid_move_bps_{suffix}s"
+        ] = (
+            (
+                future_mid
+                - mid
+            )
+            / mid
+            * 10_000
+        )
+
+        out[
+            f"future_buy_liquidity_cost_bps_{suffix}s"
+        ] = (
+            (
+                future_buy_vwap
+                - future_mid
+            )
+            / future_mid
+            * 10_000
+        )
+
+        out[
+            f"future_sell_liquidity_cost_bps_{suffix}s"
+        ] = (
+            (
+                future_mid
+                - future_sell_vwap
+            )
+            / future_mid
+            * 10_000
+        )
 
     return out
