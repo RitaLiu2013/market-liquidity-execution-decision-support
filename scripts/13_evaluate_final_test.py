@@ -516,34 +516,31 @@ def main() -> None:
     )
 
     security_summary = (
-        final_only.groupby(
-            "security",
-            as_index=False,
-        )
-        .agg(
-            mean_mae_bps=(
-                "mae_bps",
-                "mean",
-            ),
-            mean_improvement_vs_(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                "mean",
-            ),
-            wins_vs_persistence=(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                lambda x: int(
+          final_only.groupby(
+               "security",
+               as_index=False,
+          )
+          .agg(
+               mean_mae_bps=(
+                    "mae_bps",
+                    "mean",
+               ),
+          mean_improvement_vs_persistence_pct=(
+               "mae_improvement_vs_persistence_pct",
+               "mean",
+               ),
+          wins_vs_persistence=(
+               "mae_improvement_vs_persistence_pct",
+               lambda x: int(
                     (x > 0).sum()
-                ),
-            ),
-            worst_group_improvement_pct=(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                "min",
-            ),
-        )
-    )
+                    ),
+               ),
+          worst_group_improvement_pct=(
+               "mae_improvement_vs_persistence_pct",
+               "min",
+               ),
+          )
+     )
 
     security_summary.to_csv(
         SECURITY_OUTPUT_PATH,
@@ -561,34 +558,31 @@ def main() -> None:
     )
 
     horizon_summary = (
-        final_only.groupby(
-            "horizon_seconds",
-            as_index=False,
-        )
-        .agg(
-            mean_mae_bps=(
+          final_only.groupby(
+               "horizon_seconds",
+               as_index=False,
+          )
+          .agg(
+               mean_mae_bps=(
                 "mae_bps",
-                "mean",
-            ),
-            mean_improvement_vs_(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                "mean",
-            ),
-            wins_vs_persistence=(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                lambda x: int(
-                    (x > 0).sum()
-                ),
-            ),
-            worst_group_improvement_pct=(
-                "mae_improvement_vs_"
-                "persistence_pct",
-                "min",
-            ),
-        )
-    )
+               "mean",
+               ),
+          mean_improvement_vs_persistence_pct=(
+                 "mae_improvement_vs_persistence_pct",
+               "mean",
+               ),
+          wins_vs_persistence=(
+                 "mae_improvement_vs_persistence_pct",
+               lambda x: int(
+                     (x > 0).sum()
+                    ),
+               ),
+          worst_group_improvement_pct=(
+                 "mae_improvement_vs_persistence_pct",
+               "min",
+               ),
+          )
+     )
 
     horizon_summary.to_csv(
         HORIZON_OUTPUT_PATH,
