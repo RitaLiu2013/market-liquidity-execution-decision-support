@@ -7,35 +7,66 @@ import pandas as pd
 def add_future_execution_targets(
     df: pd.DataFrame,
     quantity: int,
-    horizons: tuple[float, ...] = (1.0, 5.0, 10.0),
+    horizons: tuple[float, ...] = (
+        1.0,
+        5.0,
+        10.0,
+    ),
 ) -> pd.DataFrame:
     out = df.copy()
 
-    time = out["time"].to_numpy(dtype=float)
-    mid = out["mid"].to_numpy(dtype=float)
+    time = out[
+        "time"
+    ].to_numpy(
+        dtype=float
+    )
+
+    mid = out[
+        "mid"
+    ].to_numpy(
+        dtype=float
+    )
 
     buy_vwap = out[
         f"buy_vwap_{quantity}"
-    ].to_numpy(dtype=float)
+    ].to_numpy(
+        dtype=float
+    )
 
     sell_vwap = out[
         f"sell_vwap_{quantity}"
-    ].to_numpy(dtype=float)
+    ].to_numpy(
+        dtype=float
+    )
 
     n = len(out)
 
-    for horizon in horizons:
-        target_time = time + horizon
+    end_time = time[-1]
 
-        future_idx = np.searchsorted(
-            time,
-            target_time,
-            side="left",
+    for horizon in horizons:
+        requested_time = (
+            time + horizon
         )
 
-        valid = future_idx < n
+        # State of the book exactly at t+h:
+        # use the latest snapshot at or before t+h.
+        future_idx = (
+            np.searchsorted(
+                time,
+                requested_time,
+                side="right",
+            )
+            - 1
+        )
 
-        matched_time = np.full(
+        # If t+h lies beyond the available
+        # trading-day data, the target is unavailable.
+        valid = (
+            requested_time
+            <= end_time
+        )
+
+        state_time = np.full(
             n,
             np.nan,
             dtype=float,
@@ -59,35 +90,50 @@ def add_future_execution_targets(
             dtype=float,
         )
 
-        matched_time[valid] = (
-            time[future_idx[valid]]
+        state_time[valid] = (
+            time[
+                future_idx[valid]
+            ]
         )
 
         future_mid[valid] = (
-            mid[future_idx[valid]]
+            mid[
+                future_idx[valid]
+            ]
         )
 
         future_buy_vwap[valid] = (
-            buy_vwap[future_idx[valid]]
+            buy_vwap[
+                future_idx[valid]
+            ]
         )
 
         future_sell_vwap[valid] = (
-            sell_vwap[future_idx[valid]]
+            sell_vwap[
+                future_idx[valid]
+            ]
         )
 
         suffix = (
-            str(horizon)
+            str(float(horizon))
             .replace(".", "p")
         )
 
         out[
-            f"future_time_{suffix}s"
-        ] = matched_time
+            f"requested_time_{suffix}s"
+        ] = requested_time
 
         out[
-            f"actual_horizon_{suffix}s"
+            f"future_state_time_{suffix}s"
+        ] = state_time
+
+        # How old is the most recent order-book
+        # snapshot at the decision horizon?
+        out[
+            f"state_staleness_{suffix}s"
         ] = (
-            matched_time - time
+            requested_time
+            - state_time
         )
 
         out[
