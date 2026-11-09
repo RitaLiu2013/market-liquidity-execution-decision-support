@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Environments
+.venv/
+.env/
+
+# macOS
+.DS_Store
+
+# Raw market data
+data/raw/
+
+# Processed analytical datasets
+data/processed/
+
+# Generated experiment outputs
+outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
