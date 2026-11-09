@@ -28,12 +28,29 @@ DETAIL_OUTPUT_PATH = Path(
     "outputs/final_test_metrics.csv"
 )
 
+OVERALL_OUTPUT_PATH = Path(
+    "outputs/final_test_overall_summary.csv"
+)
+
 SECURITY_OUTPUT_PATH = Path(
     "outputs/final_test_security_summary.csv"
 )
 
 HORIZON_OUTPUT_PATH = Path(
     "outputs/final_test_horizon_summary.csv"
+)
+
+COVERAGE_OUTPUT_PATH = Path(
+    "outputs/final_test_coverage_summary.csv"
+)
+
+
+FORBIDDEN_FEATURE_PREFIXES = (
+    "wait_",
+    "future_",
+    "requested_time_",
+    "state_staleness_",
+    "mid_move_",
 )
 
 
@@ -50,6 +67,31 @@ def regression_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
 ) -> dict[str, float]:
+    if len(y_true) == 0:
+        raise ValueError(
+            "Cannot evaluate an empty target array."
+        )
+
+    if len(y_true) != len(y_pred):
+        raise ValueError(
+            "y_true and y_pred must have "
+            "the same length."
+        )
+
+    if not np.isfinite(
+        y_true
+    ).all():
+        raise ValueError(
+            "y_true contains non-finite values."
+        )
+
+    if not np.isfinite(
+        y_pred
+    ).all():
+        raise ValueError(
+            "y_pred contains non-finite values."
+        )
+
     return {
         "mae_bps": mean_absolute_error(
             y_true,
@@ -74,7 +116,185 @@ def regression_metrics(
     }
 
 
+def validate_frozen_specification(
+) -> None:
+    if not FINAL_FEATURES:
+        raise ValueError(
+            "FINAL_FEATURES is empty."
+        )
+
+    if len(
+        FINAL_FEATURES
+    ) != len(
+        set(
+            FINAL_FEATURES
+        )
+    ):
+        raise ValueError(
+            "FINAL_FEATURES contains duplicates."
+        )
+
+    suspicious_features = [
+        feature
+        for feature in FINAL_FEATURES
+        if feature.startswith(
+            FORBIDDEN_FEATURE_PREFIXES
+        )
+    ]
+
+    if suspicious_features:
+        raise ValueError(
+            "Potential leakage features found "
+            "in FINAL_FEATURES: "
+            f"{suspicious_features}"
+        )
+
+    if not HORIZONS:
+        raise ValueError(
+            "HORIZONS is empty."
+        )
+
+    if len(
+        HORIZONS
+    ) != len(
+        set(
+            HORIZONS
+        )
+    ):
+        raise ValueError(
+            "HORIZONS contains duplicates."
+        )
+
+    if any(
+        float(
+            horizon
+        ) <= 0
+        for horizon in HORIZONS
+    ):
+        raise ValueError(
+            "All horizons must be positive."
+        )
+
+
+def validate_dataset(
+    df: pd.DataFrame,
+    path: Path,
+) -> tuple[str, int]:
+    required_metadata = [
+        "security",
+        "calibrated_quantity",
+        "split",
+    ]
+
+    missing_metadata = [
+        column
+        for column in required_metadata
+        if column
+        not in df.columns
+    ]
+
+    if missing_metadata:
+        raise ValueError(
+            f"{path.name}: missing metadata "
+            f"columns {missing_metadata}"
+        )
+
+    if df.empty:
+        raise ValueError(
+            f"{path.name}: dataset is empty."
+        )
+
+    securities = (
+        df["security"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    if len(
+        securities
+    ) != 1:
+        raise ValueError(
+            f"{path.name}: expected exactly "
+            f"one security, found "
+            f"{list(securities)}"
+        )
+
+    quantities = (
+        df[
+            "calibrated_quantity"
+        ]
+        .dropna()
+        .unique()
+    )
+
+    if len(
+        quantities
+    ) != 1:
+        raise ValueError(
+            f"{path.name}: expected exactly "
+            "one calibrated quantity."
+        )
+
+    required_splits = {
+        "train",
+        "validation",
+        "test",
+    }
+
+    observed_splits = set(
+        df["split"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    missing_splits = (
+        required_splits
+        - observed_splits
+    )
+
+    if missing_splits:
+        raise ValueError(
+            f"{path.name}: missing splits "
+            f"{sorted(missing_splits)}"
+        )
+
+    return (
+        str(
+            securities[0]
+        ),
+        int(
+            quantities[0]
+        ),
+    )
+
+
+def assert_no_infinite_values(
+    frame: pd.DataFrame,
+    columns: list[str],
+    label: str,
+) -> None:
+    values = (
+        frame[
+            columns
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    if np.isinf(
+        values
+    ).any():
+        raise ValueError(
+            f"{label}: infinite values found."
+        )
+
+
 def main() -> None:
+    validate_frozen_specification()
+
     paths = sorted(
         DATA_ROOT.glob(
             "*_predictive.parquet"
@@ -86,21 +306,23 @@ def main() -> None:
             "No predictive Parquet files found."
         )
 
-    rows = []
+    rows: list[
+        dict[
+            str,
+            object,
+        ]
+    ] = []
 
     for path in paths:
         df = pd.read_parquet(
             path
         )
 
-        security = str(
-            df["security"].iloc[0]
-        )
-
-        quantity = int(
-            df[
-                "calibrated_quantity"
-            ].iloc[0]
+        security, quantity = (
+            validate_dataset(
+                df,
+                path,
+            )
         )
 
         print(
@@ -110,7 +332,8 @@ def main() -> None:
         missing_features = [
             feature
             for feature in FINAL_FEATURES
-            if feature not in df.columns
+            if feature
+            not in df.columns
         ]
 
         if missing_features:
@@ -119,11 +342,15 @@ def main() -> None:
                 f"features {missing_features}"
             )
 
-        # Final development sample:
-        # after model specification has been frozen,
-        # train and validation may be combined.
+        # Final specification is already frozen.
+        #
+        # Refit the model using train + validation.
+        #
+        # Rows labelled "purged" remain excluded.
         development = df.loc[
-            df["split"].isin(
+            df[
+                "split"
+            ].isin(
                 [
                     "train",
                     "validation",
@@ -131,8 +358,12 @@ def main() -> None:
             )
         ]
 
+        # Test is never used in model fitting.
         test = df.loc[
-            df["split"] == "test"
+            df[
+                "split"
+            ]
+            == "test"
         ]
 
         if development.empty:
@@ -148,7 +379,9 @@ def main() -> None:
 
         for horizon in HORIZONS:
             suffix = horizon_suffix(
-                horizon
+                float(
+                    horizon
+                )
             )
 
             for side in (
@@ -166,7 +399,9 @@ def main() -> None:
                 )
 
                 required_columns = (
-                    FINAL_FEATURES
+                    list(
+                        FINAL_FEATURES
+                    )
                     + [
                         current_cost_col,
                         target_col,
@@ -175,19 +410,21 @@ def main() -> None:
 
                 missing_columns = [
                     column
-                    for column in required_columns
-                    if column not in df.columns
+                    for column
+                    in required_columns
+                    if column
+                    not in df.columns
                 ]
 
                 if missing_columns:
                     raise ValueError(
                         f"{security}: missing "
-                        f"columns {missing_columns}"
+                        f"columns "
+                        f"{missing_columns}"
                     )
 
-                # Use the same complete-case test
-                # observations for persistence
-                # and the final model.
+                # Use exactly the same complete-case
+                # observations for persistence and HGB.
                 development_common = (
                     development[
                         required_columns
@@ -219,6 +456,27 @@ def main() -> None:
                         f"{side}: no usable "
                         "test rows."
                     )
+
+                assert_no_infinite_values(
+                    development_common,
+                    required_columns,
+                    (
+                        f"{security} "
+                        f"{horizon}s "
+                        f"{side} "
+                        "development"
+                    ),
+                )
+
+                assert_no_infinite_values(
+                    test_common,
+                    required_columns,
+                    (
+                        f"{security} "
+                        f"{horizon}s "
+                        f"{side} test"
+                    ),
+                )
 
                 X_development = (
                     development_common[
@@ -259,7 +517,9 @@ def main() -> None:
                     )
                 )
 
-                # F0 persistence benchmark.
+                # F0 persistence:
+                #
+                # Future cost = current cost.
                 persistence_prediction = (
                     current_test_cost
                 )
@@ -271,8 +531,16 @@ def main() -> None:
                     )
                 )
 
-                # Frozen F5 residual HGB.
-                model = build_final_model()
+                # Frozen F5 residual HGB:
+                #
+                # Future cost
+                # =
+                # current cost
+                # +
+                # predicted residual.
+                model = (
+                    build_final_model()
+                )
 
                 model.fit(
                     X_development,
@@ -297,13 +565,13 @@ def main() -> None:
                     )
                 )
 
-                persistence_mae = (
+                persistence_mae = float(
                     persistence_metrics[
                         "mae_bps"
                     ]
                 )
 
-                final_mae = (
+                final_mae = float(
                     final_metrics[
                         "mae_bps"
                     ]
@@ -321,17 +589,31 @@ def main() -> None:
                 base_info = {
                     "security": security,
                     "quantity": quantity,
-                    "horizon_seconds": horizon,
+                    "horizon_seconds": float(
+                        horizon
+                    ),
                     "side": side,
                     "development_rows": len(
                         development_common
+                    ),
+                    "development_coverage": (
+                        len(
+                            development_common
+                        )
+                        / len(
+                            development
+                        )
                     ),
                     "test_rows": len(
                         test_common
                     ),
                     "test_coverage": (
-                        len(test_common)
-                        / len(test)
+                        len(
+                            test_common
+                        )
+                        / len(
+                            test
+                        )
                     ),
                 }
 
@@ -371,6 +653,73 @@ def main() -> None:
         rows
     )
 
+    if results.empty:
+        raise ValueError(
+            "Final test evaluation produced "
+            "no result rows."
+        )
+
+    key_columns = [
+        "security",
+        "horizon_seconds",
+        "side",
+        "model",
+    ]
+
+    if results.duplicated(
+        key_columns
+    ).any():
+        raise ValueError(
+            "Duplicate final-test result "
+            "groups were produced."
+        )
+
+    expected_groups = (
+        len(
+            paths
+        )
+        * len(
+            HORIZONS
+        )
+        * 2
+    )
+
+    persistence_only = (
+        results.loc[
+            results[
+                "model"
+            ]
+            == "persistence"
+        ]
+        .copy()
+    )
+
+    final_only = (
+        results.loc[
+            results[
+                "model"
+            ]
+            == "residual_hgb"
+        ]
+        .copy()
+    )
+
+    if len(
+        persistence_only
+    ) != expected_groups:
+        raise ValueError(
+            "Unexpected number of persistence "
+            "result groups."
+        )
+
+    if len(
+        final_only
+    ) != expected_groups:
+        raise ValueError(
+            "Unexpected number of final-model "
+            "result groups."
+        )
+
     DETAIL_OUTPUT_PATH.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -381,24 +730,9 @@ def main() -> None:
         index=False,
     )
 
-    final_only = (
-        results.loc[
-            results["model"]
-            == "residual_hgb"
-        ]
-        .copy()
-    )
-
-    persistence_only = (
-        results.loc[
-            results["model"]
-            == "persistence"
-        ]
-        .copy()
-    )
-
     print(
-        "\nFinal untouched test results"
+        "\nFinal test results "
+        "(frozen specification)"
     )
 
     display_columns = [
@@ -424,21 +758,40 @@ def main() -> None:
         )
     )
 
+    # These are equal-weight averages across
+    # security × horizon × side groups.
+    persistence_mean_mae = float(
+        persistence_only[
+            "mae_bps"
+        ].mean()
+    )
+
+    final_mean_mae = float(
+        final_only[
+            "mae_bps"
+        ].mean()
+    )
+
+    aggregate_mae_improvement = (
+        (
+            persistence_mean_mae
+            - final_mean_mae
+        )
+        / persistence_mean_mae
+        * 100.0
+    )
+
     comparison = pd.DataFrame(
         {
             "model": [
                 "persistence",
                 "final_residual_hgb",
             ],
-            "mean_mae_bps": [
-                persistence_only[
-                    "mae_bps"
-                ].mean(),
-                final_only[
-                    "mae_bps"
-                ].mean(),
+            "group_weighted_mean_mae_bps": [
+                persistence_mean_mae,
+                final_mean_mae,
             ],
-            "mean_rmse_bps": [
+            "group_weighted_mean_rmse_bps": [
                 persistence_only[
                     "rmse_bps"
                 ].mean(),
@@ -446,7 +799,8 @@ def main() -> None:
                     "rmse_bps"
                 ].mean(),
             ],
-            "mean_median_ae_bps": [
+            "group_weighted_mean_"
+            "median_ae_bps": [
                 persistence_only[
                     "median_ae_bps"
                 ].mean(),
@@ -454,7 +808,7 @@ def main() -> None:
                     "median_ae_bps"
                 ].mean(),
             ],
-            "mean_r2": [
+            "group_weighted_mean_r2": [
                 persistence_only[
                     "r2"
                 ].mean(),
@@ -465,8 +819,15 @@ def main() -> None:
         }
     )
 
+    comparison.to_csv(
+        OVERALL_OUTPUT_PATH,
+        index=False,
+    )
+
     print(
-        "\nOverall test comparison"
+        "\nOverall test comparison "
+        "(equal weight per "
+        "security/horizon/side group)"
     )
 
     print(
@@ -492,17 +853,26 @@ def main() -> None:
 
     print(
         "Groups beating persistence: "
-        f"{wins.sum()} / {len(wins)}"
+        f"{int(wins.sum())} / "
+        f"{len(wins)}"
     )
 
     print(
-        "Mean MAE improvement (%): "
+        "Mean group-level MAE "
+        "improvement (%): "
         f"{improvements.mean():.6f}"
     )
 
     print(
-        "Median MAE improvement (%): "
+        "Median group-level MAE "
+        "improvement (%): "
         f"{improvements.median():.6f}"
+    )
+
+    print(
+        "Aggregate group-weighted MAE "
+        "improvement (%): "
+        f"{aggregate_mae_improvement:.6f}"
     )
 
     print(
@@ -516,31 +886,45 @@ def main() -> None:
     )
 
     security_summary = (
-          final_only.groupby(
-               "security",
-               as_index=False,
-          )
-          .agg(
-               mean_mae_bps=(
-                    "mae_bps",
-                    "mean",
-               ),
-          mean_improvement_vs_persistence_pct=(
-               "mae_improvement_vs_persistence_pct",
-               "mean",
-               ),
-          wins_vs_persistence=(
-               "mae_improvement_vs_persistence_pct",
-               lambda x: int(
-                    (x > 0).sum()
-                    ),
-               ),
-          worst_group_improvement_pct=(
-               "mae_improvement_vs_persistence_pct",
-               "min",
-               ),
-          )
-     )
+        final_only.groupby(
+            "security",
+            as_index=False,
+        )
+        .agg(
+            mean_mae_bps=(
+                "mae_bps",
+                "mean",
+            ),
+            mean_improvement_vs_persistence_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "mean",
+            ),
+            median_improvement_vs_persistence_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "median",
+            ),
+            wins_vs_persistence=(
+                "mae_improvement_vs_persistence_pct",
+                lambda x: int(
+                    (
+                        x > 0
+                    ).sum()
+                ),
+            ),
+            worst_group_improvement_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "min",
+            ),
+            mean_test_coverage=(
+                "test_coverage",
+                "mean",
+            ),
+            min_test_coverage=(
+                "test_coverage",
+                "min",
+            ),
+        )
+    )
 
     security_summary.to_csv(
         SECURITY_OUTPUT_PATH,
@@ -558,31 +942,41 @@ def main() -> None:
     )
 
     horizon_summary = (
-          final_only.groupby(
-               "horizon_seconds",
-               as_index=False,
-          )
-          .agg(
-               mean_mae_bps=(
+        final_only.groupby(
+            "horizon_seconds",
+            as_index=False,
+        )
+        .agg(
+            mean_mae_bps=(
                 "mae_bps",
-               "mean",
-               ),
-          mean_improvement_vs_persistence_pct=(
-                 "mae_improvement_vs_persistence_pct",
-               "mean",
-               ),
-          wins_vs_persistence=(
-                 "mae_improvement_vs_persistence_pct",
-               lambda x: int(
-                     (x > 0).sum()
-                    ),
-               ),
-          worst_group_improvement_pct=(
-                 "mae_improvement_vs_persistence_pct",
-               "min",
-               ),
-          )
-     )
+                "mean",
+            ),
+            mean_improvement_vs_persistence_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "mean",
+            ),
+            median_improvement_vs_persistence_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "median",
+            ),
+            wins_vs_persistence=(
+                "mae_improvement_vs_persistence_pct",
+                lambda x: int(
+                    (
+                        x > 0
+                    ).sum()
+                ),
+            ),
+            worst_group_improvement_pct=(
+                "mae_improvement_vs_persistence_pct",
+                "min",
+            ),
+            mean_test_coverage=(
+                "test_coverage",
+                "mean",
+            ),
+        )
+    )
 
     horizon_summary.to_csv(
         HORIZON_OUTPUT_PATH,
@@ -599,21 +993,60 @@ def main() -> None:
         )
     )
 
+    coverage_summary = (
+        final_only.groupby(
+            "security",
+            as_index=False,
+        )
+        .agg(
+            mean_development_coverage=(
+                "development_coverage",
+                "mean",
+            ),
+            min_development_coverage=(
+                "development_coverage",
+                "min",
+            ),
+            mean_test_coverage=(
+                "test_coverage",
+                "mean",
+            ),
+            min_test_coverage=(
+                "test_coverage",
+                "min",
+            ),
+        )
+    )
+
+    coverage_summary.to_csv(
+        COVERAGE_OUTPUT_PATH,
+        index=False,
+    )
+
+    print(
+        "\nCoverage summary"
+    )
+
+    print(
+        coverage_summary.to_string(
+            index=False
+        )
+    )
+
     print(
         "\nSaved:"
     )
 
-    print(
-        DETAIL_OUTPUT_PATH
-    )
-
-    print(
-        SECURITY_OUTPUT_PATH
-    )
-
-    print(
-        HORIZON_OUTPUT_PATH
-    )
+    for output_path in (
+        DETAIL_OUTPUT_PATH,
+        OVERALL_OUTPUT_PATH,
+        SECURITY_OUTPUT_PATH,
+        HORIZON_OUTPUT_PATH,
+        COVERAGE_OUTPUT_PATH,
+    ):
+        print(
+            output_path
+        )
 
 
 if __name__ == "__main__":
